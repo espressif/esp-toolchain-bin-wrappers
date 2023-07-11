@@ -112,3 +112,20 @@ fn is_compiler(tool_name: String) -> bool {
     }
     return false;
 }
+
+#[cfg(all(windows, target_pointer_width = "32"))]
+#[no_mangle]
+pub extern "C" fn _Unwind_Resume() {
+    /*
+     * Mingw for 32-bit windows usually does not have DWARF unwinder, and as a result,
+     * the _Unwind_Resume function is absent in libraries. To avoid linking against
+     * this missing function, the panic=abort option is specified for the win32
+     * target in config.toml.
+     *
+     * However, Rust attempts to link with _Unwind_Resume() even with panic=abort
+     * See https://github.com/rust-lang/rust/issues/79609
+     *
+     * panic=abort will never call _Unwind_Resume.
+     * So, this dummy function is created just to make linker happy
+     */
+}
