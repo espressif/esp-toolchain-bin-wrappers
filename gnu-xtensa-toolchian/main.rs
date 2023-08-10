@@ -1,5 +1,3 @@
-extern crate libc;
-
 use std::env;
 use std::ffi::CString;
 use std::iter::once;
