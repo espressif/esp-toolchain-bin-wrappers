@@ -125,9 +125,16 @@ fn get_exec_argv(no_python: bool) -> Vec<String> {
         }
     }
 
-    let mut option = String::new();
     if arch == "xtensa" {
-        option = format!("--mcpu={}", chip).to_string();
+        let dynconfig_path = bin_dir
+            .parent()
+            .expect("Executable must be in some directory")
+            .join("lib")
+            .join(format!("xtensa_{}.so", chip))
+            .as_path()
+            .display()
+            .to_string();
+        add_to_environment("XTENSA_GNU_CONFIG", dynconfig_path, false);
         chip = "esp";
     }
     let python_version = if no_python {
@@ -162,10 +169,7 @@ fn get_exec_argv(no_python: bool) -> Vec<String> {
     );
     let exec_path = exec_path.as_path().display().to_string();
 
-    let mut argv = vec![exec_path];
-    if !option.is_empty() {
-        argv.push(option);
-    }
+    let argv = vec![exec_path];
     esp_debug_trace!("Base argv is: {:?}", argv);
     return argv;
 }

@@ -41,12 +41,12 @@ do                         \
 
 
 #if TARGET_ESP_ARCH_XTENSA
-static void set_mcpu_option(const char *filename, char *mcpu, const size_t mcpu_size);
+static void set_mcpu_option_and_fixup_filename(const char *exe_path);
+static char *get_filename_ptr(const char *exe_path);
 #endif
 static char *get_module_filename(size_t append_memory_size);
-static char *get_filename_ptr(const char *exe_path);
-static char *get_exe_path_and_mcpu_option(const char *python_version, char *mcpu_option, const size_t mcpu_option_size);
-static char *get_cmdline(const int argc, const char **argv, const char *exe_path, const char * mcpu_option);
+static char *get_exe_path(const char *python_version);
+static char *get_cmdline(const int argc, const char **argv, const char *exe_path);
 static void get_python_info(char **version, char **base_prefix);
 static int execute_cmdline(const char *cmdline, BOOL test_run);
 static int update_environment_variables(const char *python_base_prefix);
@@ -105,11 +105,10 @@ int main (int argc, char **argv) {
 static int run_gdb(const char *python_version, const int argc, const char ** argv, BOOL test_run) {
   char *cmdline = NULL;
   char *exe_path = NULL;
-  char mcpu_option[MCPU_MAX_LEN] = {0};
   int exit_code = 0;
 
-  exe_path = get_exe_path_and_mcpu_option(python_version, mcpu_option, sizeof(mcpu_option));
-  cmdline = get_cmdline(argc, argv, exe_path, mcpu_option);
+  exe_path = get_exe_path(python_version);
+  cmdline = get_cmdline(argc, argv, exe_path);
   exit_code = execute_cmdline(cmdline, test_run);
 
   free(exe_path);
@@ -198,6 +197,7 @@ static char *get_module_filename(size_t append_memory_size) {
   return exe_path;
 }
 
+#if TARGET_ESP_ARCH_XTENSA
 static char *get_filename_ptr(const char *exe_path) {
   char *filename = strrchr(exe_path, '\\');
   if(filename == NULL) {
@@ -213,49 +213,61 @@ static char *get_filename_ptr(const char *exe_path) {
   return filename++;
 }
 
-#if TARGET_ESP_ARCH_XTENSA
-static void set_mcpu_option(const char *filename, char *mcpu, const size_t mcpu_option_size) {
+static void set_mcpu_option_and_fixup_filename(const char *exe_path) {
+  char *filename = get_filename_ptr(exe_path);
   char *mcpu_start = strchr(filename, '-');
-  char *mcpu_end = strchr(&filename[strlen(GDB_FILENAME_PREFIX)], '-');
-  size_t len_to_write = 0;
+  char *mcpu_end = NULL;
+  char *xtensa_dynconfig = strdup(exe_path);
+  char *delimeter;
+  for (int i = 0; i < 2; i ++) {
+    delimeter = strrchr(xtensa_dynconfig, '\\');
+    if(delimeter == NULL) {
+      fprintf(stderr, "Wrong path, can't extract root dir (root/bin/gdb.exe): \"%s\"", xtensa_dynconfig);
+      abort();
+    }
+    *delimeter = '\0';
+  }
 
-  if (mcpu_start == NULL || mcpu_end == NULL) {
+  if (mcpu_start == NULL) {
     fprintf(stderr, "Wrong filename format. Expected \"%s\"", GDB_FILENAME_EXAMPLE);
     abort();
   }
-  mcpu_start++;
 
-  len_to_write = mcpu_end - mcpu_start + strlen(MCPU_PREFIX);
-  if (mcpu_option_size < len_to_write) {
-    fprintf(stderr, "insufficient buffer size\n");
+  mcpu_end = strchr(++mcpu_start, '-');
+  if (mcpu_end == NULL) {
+    fprintf(stderr, "Wrong filename format. Expected \"%s\"", GDB_FILENAME_EXAMPLE);
     abort();
   }
-  snprintf(mcpu, len_to_write, "%s%s", MCPU_PREFIX, mcpu_start);
+
+  strcat(xtensa_dynconfig, "\\lib\\xtensa_");
+  strncat(xtensa_dynconfig, mcpu_start, mcpu_end - mcpu_start);
+  strcat(xtensa_dynconfig, ".so");
+
+  if (!SetEnvironmentVariable("XTENSA_GNU_CONFIG", xtensa_dynconfig)) {
+    fprintf(stderr, "SetEnvironmentVariable(XTENSA_GNU_CONFIG) failed: %s\r\n", GetLastError());
+    abort();
+  }
+  free(xtensa_dynconfig);
+
+  mcpu_start += strlen(MCPU_BASE);
+  memmove(mcpu_start, mcpu_end, strlen(mcpu_end) + 1);
 
   return;
 }
 #endif
 
-static char *get_exe_path_and_mcpu_option(const char *python_version, char *mcpu_option, const size_t mcpu_option_size) {
+static char *get_exe_path(const char *python_version) {
   char *exe_path = NULL;
   char *base_path = NULL;
-  char *filename = NULL;
   const char *python_suffix = python_version ? python_version : GDB_NO_PYTHON_SUFFIX;
   size_t chars_to_remove = 0;
   char *start = NULL;
   size_t chars_to_move = 0;
 
   exe_path = get_module_filename(strlen(python_suffix) + 1);
-  filename = get_filename_ptr(exe_path);
 
 #if TARGET_ESP_ARCH_XTENSA
-  set_mcpu_option(filename, mcpu_option, mcpu_option_size);
-
-  // Remove esp mcpu from filename
-  chars_to_remove = strlen(mcpu_option) - strlen(MCPU_PREFIX) - strlen(MCPU_BASE);
-  start = filename + strlen(GDB_FILENAME_PREFIX) + 1;
-  chars_to_move = strlen(start) - chars_to_remove + 1;
-  memmove(start, start + chars_to_remove, chars_to_move);
+  set_mcpu_option_and_fixup_filename(exe_path);
 #endif
 
   // insert python_version to the filename
@@ -284,13 +296,13 @@ static char *get_exe_path_and_mcpu_option(const char *python_version, char *mcpu
   return exe_path;
 }
 
-static char *get_cmdline(const int argc, const char **argv, const char *exe_path, const char * mcpu_option) {
-  char * cmdline = (char *)malloc(strlen(exe_path) + strlen(mcpu_option) + 2);
+static char *get_cmdline(const int argc, const char **argv, const char *exe_path) {
+  char * cmdline = (char *)malloc(strlen(exe_path) + 1);
   if (cmdline == NULL) {
     perror("malloc");
     abort();
   }
-  sprintf(cmdline, "%s %s", exe_path, mcpu_option);
+  strcpy(cmdline, exe_path);
 
   // Append with user's arguments. Protect them with quotes
   for (int i = 1; i < argc; i++) {
