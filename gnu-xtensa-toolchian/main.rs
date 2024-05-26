@@ -1,14 +1,19 @@
 use lazy_static::lazy_static;
 use std::env;
-#[cfg(unix)]
 use std::ffi::CString;
 #[cfg(unix)]
 use std::iter::once;
 use std::path::Path;
 #[cfg(windows)]
+use std::path::PathBuf;
+#[cfg(windows)]
 use std::process::{exit, Command, ExitStatus};
 #[cfg(unix)]
 use std::ptr::null;
+#[cfg(windows)]
+use std::ffi::CStr;
+#[cfg(windows)]
+use std::ffi::c_char;
 
 const CONFIG_ENV_NAME: &str = "XTENSA_GNU_CONFIG";
 const XTENSA_TOOLCHAIN_PREFIX: &str = "xtensa-esp-elf-";
@@ -31,8 +36,85 @@ macro_rules! esp_debug_trace {
     };
 }
 
+#[cfg(windows)]
+extern "system" {
+    fn GetLongPathNameA(
+        lpszShortPath: *const u8,
+        lpszLongPath: *mut u8,
+        cchBuffer: u32,
+    ) -> u32;
+    fn GetShortPathNameA(
+        lpszLongPath: *const u8,
+        lpszShortPath: *mut u8,
+        cchBuffer: u32,
+    ) -> u32;
+    fn GetLastError() -> u32;
+}
+
+#[cfg(windows)]
+fn get_path_name(
+    input_path: &str,
+    api_function: unsafe extern "system" fn(*const u8, *mut u8, u32) -> u32,
+) -> String {
+    // Convert the Rust string to a C-compatible string
+    let c_input_path = CString::new(input_path).expect("CString::new failed");
+
+    // Start with an initial buffer size (e.g., 260 for MAX_PATH)
+    let mut buffer_size = 260;
+    let mut buffer: Vec<u8> = vec![0; buffer_size];
+
+    loop {
+        // Call the provided API function
+        let length = unsafe {
+            api_function(
+                c_input_path.as_ptr() as *const u8,
+                buffer.as_mut_ptr(),
+                buffer.len() as u32,
+            )
+        };
+
+        assert_ne!(length, 0, "Failed to get path name. Error code: {}", unsafe { GetLastError() } );
+        if length > buffer_size as u32 {
+            // The buffer is too small, resize it
+            buffer_size = length as usize;
+            buffer.resize(buffer_size, 0);
+        } else {
+            // The function succeeded, convert the buffer to a Rust String
+            let c_result_path = unsafe { CStr::from_ptr(buffer.as_ptr() as *const c_char) };
+            return c_result_path.to_str().unwrap().to_owned();
+        }
+    }
+}
+
+#[cfg(windows)]
+fn get_long_path_name(short_path: &str) -> String {
+    get_path_name(short_path, GetLongPathNameA)
+}
+
+#[cfg(windows)]
+fn get_short_path_name(long_path: &str) -> String {
+    get_path_name(long_path, GetShortPathNameA)
+}
+
 fn main() {
-    let wrapper_path = env::current_exe().expect("Get exec full path");
+    let wrapper_path;
+    #[cfg(windows)]
+    let short_path_using;
+    #[cfg(windows)]
+    {
+        let exe_path = env::current_exe().expect("Get executable path");
+        let exe_path_str = exe_path.to_str().unwrap();
+        short_path_using = exe_path_str == get_short_path_name(exe_path_str);
+        if short_path_using {
+            wrapper_path = PathBuf::from(get_long_path_name(exe_path_str));
+        } else {
+            wrapper_path = exe_path;
+        }
+    }
+    #[cfg(unix)]
+    {
+        wrapper_path = env::current_exe().expect("Get exec full path");
+    }
     let wrapper_name = Path::new(&wrapper_path)
         .file_name()
         .expect("Current exe has path")
@@ -77,7 +159,14 @@ fn main() {
         .join("lib")
         .as_path()
         .join(dynconfig_filename.clone());
-    let dynconfig = dynconfig_path.as_path().display().to_string();
+
+    let dynconfig_path_str = dynconfig_path.as_path().display().to_string();
+
+    #[cfg(windows)]
+    let dynconfig = if short_path_using { get_short_path_name(&dynconfig_path_str) } else { dynconfig_path_str };
+    #[cfg(unix)]
+    let dynconfig = dynconfig_path_str;
+
     assert!(
         dynconfig_path.try_exists().unwrap(),
         "Dynconfig for target {} is not exist ({})",
@@ -90,7 +179,14 @@ fn main() {
     env::set_var(CONFIG_ENV_NAME, dynconfig);
 
     let mut argv: Vec<String> = std::env::args().peekable().map(|x| x.clone()).collect();
-    argv[0] = exec_path_str;
+    #[cfg(windows)]
+    {
+        argv[0] = if short_path_using { get_short_path_name(&exec_path_str) } else { exec_path_str };
+    }
+    #[cfg(unix)]
+    {
+        argv[0] = exec_path_str;
+    }
     if is_compiler(tool_name) {
         /* Need to add mdynconfig option for using the right multilib instance */
         let dynconfig_option = format!("-mdynconfig={}", dynconfig_filename);
