@@ -1,5 +1,9 @@
 use lazy_static::lazy_static;
 use std::env;
+#[cfg(windows)]
+use std::ffi::c_char;
+#[cfg(windows)]
+use std::ffi::CStr;
 use std::ffi::CString;
 #[cfg(unix)]
 use std::iter::once;
@@ -10,20 +14,13 @@ use std::path::PathBuf;
 use std::process::{exit, Command, ExitStatus};
 #[cfg(unix)]
 use std::ptr::null;
-#[cfg(windows)]
-use std::ffi::CStr;
-#[cfg(windows)]
-use std::ffi::c_char;
 
 const CONFIG_ENV_NAME: &str = "XTENSA_GNU_CONFIG";
 const XTENSA_TOOLCHAIN_PREFIX: &str = "xtensa-esp-elf-";
 const XTENSA_TOOL_PARSE_ERROR: &str = "Called tool must have pattern \"xtensa-esp*-elf-*\"";
 
 lazy_static! {
-    static ref ESP_DEBUG_TRACE: bool = match env::var("ESP_DEBUG_TRACE") {
-        Ok(_) => true,
-        Err(_) => false,
-    };
+    static ref ESP_DEBUG_TRACE: bool = env::var("ESP_DEBUG_TRACE").is_ok();
 }
 
 macro_rules! esp_debug_trace {
@@ -38,16 +35,8 @@ macro_rules! esp_debug_trace {
 
 #[cfg(windows)]
 extern "system" {
-    fn GetLongPathNameA(
-        lpszShortPath: *const u8,
-        lpszLongPath: *mut u8,
-        cchBuffer: u32,
-    ) -> u32;
-    fn GetShortPathNameA(
-        lpszLongPath: *const u8,
-        lpszShortPath: *mut u8,
-        cchBuffer: u32,
-    ) -> u32;
+    fn GetLongPathNameA(lpszShortPath: *const u8, lpszLongPath: *mut u8, cchBuffer: u32) -> u32;
+    fn GetShortPathNameA(lpszLongPath: *const u8, lpszShortPath: *mut u8, cchBuffer: u32) -> u32;
     fn GetLastError() -> u32;
 }
 
@@ -59,7 +48,7 @@ fn get_path_name(
     // Convert the Rust string to a C-compatible string
     let c_input_path = CString::new(input_path).expect("CString::new failed");
 
-    // Start with an initial buffer size (e.g., 260 for MAX_PATH)
+    // Start with an initial buffer size (default is 260 for MAX_PATH)
     let mut buffer_size = 260;
     let mut buffer: Vec<u8> = vec![0; buffer_size];
 
@@ -73,9 +62,15 @@ fn get_path_name(
             )
         };
 
-        assert_ne!(length, 0, "Failed to get path name. Error code: {}", unsafe { GetLastError() } );
+        assert_ne!(
+            length,
+            0,
+            "Failed to get path name. Error code: {}",
+            unsafe { GetLastError() }
+        );
         if length > buffer_size as u32 {
-            // The buffer is too small, resize it
+            // The buffer is too small. The API function returns requiered size of buffer.
+            // Resize the buffer with that value.
             buffer_size = length as usize;
             buffer.resize(buffer_size, 0);
         } else {
@@ -123,7 +118,7 @@ fn main() {
 
     let mut chip = "";
     let mut tool_name = Vec::<&str>::new();
-    for (i, s) in wrapper_name.split("-").enumerate() {
+    for (i, s) in wrapper_name.split('-').enumerate() {
         match i {
             0 => assert_eq!(s, "xtensa", "{}", XTENSA_TOOL_PARSE_ERROR),
             1 => chip = s,
@@ -163,7 +158,11 @@ fn main() {
     let dynconfig_path_str = dynconfig_path.as_path().display().to_string();
 
     #[cfg(windows)]
-    let dynconfig = if short_path_using { get_short_path_name(&dynconfig_path_str) } else { dynconfig_path_str };
+    let dynconfig = if short_path_using {
+        get_short_path_name(&dynconfig_path_str)
+    } else {
+        dynconfig_path_str
+    };
     #[cfg(unix)]
     let dynconfig = dynconfig_path_str;
 
@@ -178,10 +177,14 @@ fn main() {
     esp_debug_trace!("export {}={}", CONFIG_ENV_NAME, dynconfig);
     env::set_var(CONFIG_ENV_NAME, dynconfig);
 
-    let mut argv: Vec<String> = std::env::args().peekable().map(|x| x.clone()).collect();
+    let mut argv: Vec<String> = std::env::args().peekable().collect();
     #[cfg(windows)]
     {
-        argv[0] = if short_path_using { get_short_path_name(&exec_path_str) } else { exec_path_str };
+        argv[0] = if short_path_using {
+            get_short_path_name(&exec_path_str)
+        } else {
+            exec_path_str
+        };
     }
     #[cfg(unix)]
     {
@@ -210,7 +213,7 @@ fn exec(argv: Vec<String>) {
         .chain(once(null()))
         .collect();
 
-    let app = argv.get(0).expect("app in argv[0]").clone();
+    let app = *argv.first().expect("app in argv[0]");
 
     unsafe { libc::execv(app, argv.as_ptr()) };
     println!(
@@ -254,9 +257,13 @@ fn is_compiler(tool_name: String) -> bool {
         return true;
     }
     if tool_name.starts_with("gcc-") {
-        return tool_name.chars().nth("gcc-".len()).unwrap().is_digit(10);
+        return tool_name
+            .chars()
+            .nth("gcc-".len())
+            .unwrap()
+            .is_ascii_digit();
     }
-    return false;
+    false
 }
 
 #[cfg(all(windows, target_pointer_width = "32"))]

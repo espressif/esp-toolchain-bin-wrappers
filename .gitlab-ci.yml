@@ -1,0 +1,13 @@
+stages:
+  - rust_fmt_lint
+
+rust_fmt_lint:
+  stage: rust_fmt_lint
+  image: rust
+  tags: [ "lint", "internet", "amd64" ]
+  script:
+    - rustup component add rustfmt
+    - rustup component add clippy
+    - cd gnu-xtensa-toolchian
+    - rustfmt *.rs && git diff --exit-code
+    - cargo clippy -- -D warnings
