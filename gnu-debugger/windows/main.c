@@ -21,6 +21,7 @@
 #define GDB_EXTENSION ".exe"
 
 #define GDB_ARG_BATCH_SILENT "--batch-silent"
+#define GDB_ARG_NO_INIT "--nh"
 
 #define PYTHON_SCRIPT_CMD_OPTION " -c "
 #define PYTHON_SCRIPT_BODY "\"import sys;"\
@@ -86,7 +87,7 @@ int main (int argc, char **argv) {
 
   if (python_version) {
     // run GDB with-python to check if it executes well
-    char *test_argv[2] = { NULL, GDB_ARG_BATCH_SILENT };
+    char *test_argv[2] = { NULL, GDB_ARG_BATCH_SILENT, GDB_ARG_NO_INIT };
     if (run_gdb(python_version, 2, (const char **) test_argv, TRUE)) {
       PRINT_MESSAGE("GDB with-python test execution failed, use no-python GDB\r\n");
       free(python_version);
