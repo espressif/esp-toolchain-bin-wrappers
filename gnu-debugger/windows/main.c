@@ -23,9 +23,10 @@
 #define GDB_ARG_BATCH_SILENT "--batch-silent"
 
 #define PYTHON_SCRIPT_CMD_OPTION " -c "
-#define PYTHON_SCRIPT_BODY "\"import sys;"\
+#define PYTHON_SCRIPT_BODY "\"import os, sys;"\
 "print(\\\"{}.{}\\\".format(sys.version_info.major, sys.version_info.minor));"\
-"print(sys.base_prefix);\""
+"print(sys.base_prefix);"\
+"print(os.pathsep.join(sys.path[1:]));\""
 
 #define REDIRECT_STDERR_TO_NULL " 2>nul"
 #define PYTHON_MAJOR_WITH_DOT "3."
@@ -47,9 +48,9 @@ static char *get_filename_ptr(const char *exe_path);
 static char *get_module_filename(size_t append_memory_size);
 static char *get_exe_path(const char *python_version);
 static char *get_cmdline(const int argc, const char **argv, const char *exe_path);
-static void get_python_info(char **version, char **base_prefix);
+static void get_python_info(char **version, char **base_prefix, char **python_path);
 static int execute_cmdline(const char *cmdline, BOOL test_run);
-static int update_environment_variables(const char *python_base_prefix);
+static int update_environment_variables(const char *python_base_prefix, const char *python_path);
 static int run_gdb(const char *python_version, const int argc, const char ** argv, BOOL test_run);
 
 const char *python_exe_arr[] = {"python", "python3"};
@@ -58,7 +59,7 @@ int print_messages = 0;
 
 // Workflow:
 // 1. Get python version and python base_prefix. (python executables to check are in python_exe_arr)
-// 2. Set PYTHONHOME and append PATH environment variables with base_prefix from step 1
+// 2. Set PYTHONHOME and PYTHONPATH + append PATH environment variables with base_prefix from step 1
 // 3. Find GDB binary with python version from step 1. (GDB without python used if errors on steps 1,2)
 // 4. Execute GDB binary as a child process
 // 5. Disable ctrl+c and ctrl+break for this wrapper process
@@ -66,14 +67,15 @@ int print_messages = 0;
 int main (int argc, char **argv) {
   char *python_version;
   char *python_base_prefix;
+  char *python_path;
   const char *trace_str = getenv ("ESP_DEBUG_TRACE");
   int exit_code = 0;
   if(trace_str) {
     print_messages = atoi(trace_str) > 0;
   }
 
-  get_python_info(&python_version, &python_base_prefix);
-  if (python_version && update_environment_variables(python_base_prefix)) {
+  get_python_info(&python_version, &python_base_prefix, &python_path);
+  if (python_version && update_environment_variables(python_base_prefix, python_path)) {
     // start gdb without python if setting environment was failed
     PRINT_MESSAGE("update_environment_variables() failed, gdb without-python will be used\r\n");
     free(python_version);
@@ -82,6 +84,10 @@ int main (int argc, char **argv) {
 
   if (python_base_prefix) {
     free(python_base_prefix);
+  }
+
+  if (python_path) {
+    free(python_path);
   }
 
   if (python_version) {
@@ -317,7 +323,7 @@ static char *get_cmdline(const int argc, const char **argv, const char *exe_path
   return cmdline;
 }
 
-static int update_environment_variables(const char *python_base_prefix) {
+static int update_environment_variables(const char *python_base_prefix, const char *python_path) {
   int ret = -1;
   DWORD path_var_size = 0;
   char *buf = NULL;
@@ -363,6 +369,12 @@ static int update_environment_variables(const char *python_base_prefix) {
     goto error;
   }
 
+  // Set PYTHONPATH to have espressif virtual env modules
+  if (!SetEnvironmentVariable("PYTHONPATH", python_path)) {
+    PRINT_MESSAGE("SetEnvironmentVariable(PYTHONPATH) failed: %s\r\n", GetLastError());
+    goto error;
+  }
+
   ret = 0;
 error:
   if (buf) {
@@ -371,7 +383,7 @@ error:
   return ret;
 }
 
-static void get_python_info(char **version, char **base_prefix) {
+static void get_python_info(char **version, char **base_prefix, char **python_path) {
   char *tmp = NULL;
   const size_t python_exe_arr_size = sizeof(python_exe_arr) / sizeof(python_exe_arr[0]);
   size_t i = 0;
@@ -383,6 +395,7 @@ static void get_python_info(char **version, char **base_prefix) {
 
   *version = NULL;
   *base_prefix = NULL;
+  *python_path = NULL;
 
   for (i = 0; i < python_exe_arr_size; i++) {
     FILE* pipe = NULL;
@@ -412,6 +425,7 @@ static void get_python_info(char **version, char **base_prefix) {
     PRINT_MESSAGE("Found python version: %s\r\n", *version);
     if (strncmp(*version, PYTHON_MAJOR_WITH_DOT, strlen(PYTHON_MAJOR_WITH_DOT)) == 0) {
       *base_prefix = readline(pipe);
+      *python_path = readline(pipe);
       pclose(pipe);
       break;
     }
