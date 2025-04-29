@@ -1,19 +1,9 @@
 use lazy_static::lazy_static;
 use std::env;
-#[cfg(windows)]
-use std::ffi::c_char;
-#[cfg(windows)]
-use std::ffi::CStr;
-use std::ffi::CString;
-#[cfg(unix)]
 use std::iter::once;
 use std::path::Path;
 #[cfg(windows)]
 use std::path::PathBuf;
-#[cfg(windows)]
-use std::process::{exit, Command, ExitStatus};
-#[cfg(unix)]
-use std::ptr::null;
 
 const CONFIG_ENV_NAME: &str = "XTENSA_GNU_CONFIG";
 const XTENSA_TOOLCHAIN_PREFIX: &str = "xtensa-esp-elf-";
@@ -35,32 +25,31 @@ macro_rules! esp_debug_trace {
 
 #[cfg(windows)]
 extern "system" {
-    fn GetLongPathNameA(lpszShortPath: *const u8, lpszLongPath: *mut u8, cchBuffer: u32) -> u32;
-    fn GetShortPathNameA(lpszLongPath: *const u8, lpszShortPath: *mut u8, cchBuffer: u32) -> u32;
+    fn GetLongPathNameW(lpszShortPath: *const u16, lpszLongPath: *mut u16, cchBuffer: u32) -> u32;
+    fn GetShortPathNameW(lpszLongPath: *const u16, lpszShortPath: *mut u16, cchBuffer: u32) -> u32;
     fn GetLastError() -> u32;
 }
 
 #[cfg(windows)]
 fn get_path_name(
-    input_path: &str,
-    api_function: unsafe extern "system" fn(*const u8, *mut u8, u32) -> u32,
-) -> String {
-    // Convert the Rust string to a C-compatible string
-    let c_input_path = CString::new(input_path).expect("CString::new failed");
+    path: &PathBuf,
+    api_function: unsafe extern "system" fn(*const u16, *mut u16, u32) -> u32,
+) -> PathBuf {
+    use std::ffi::OsString;
+    use std::os::windows::ffi::OsStrExt;
+    use std::os::windows::ffi::OsStringExt;
+
+    // Convert the Rust string to a UTF-16 wide string
+    let wide_path: Vec<u16> = path.as_os_str().encode_wide().chain(once(0)).collect();
 
     // Start with an initial buffer size (default is 260 for MAX_PATH)
     let mut buffer_size = 260;
-    let mut buffer: Vec<u8> = vec![0; buffer_size];
+    let mut buffer: Vec<u16> = vec![0; buffer_size];
 
     loop {
         // Call the provided API function
-        let length = unsafe {
-            api_function(
-                c_input_path.as_ptr() as *const u8,
-                buffer.as_mut_ptr(),
-                buffer.len() as u32,
-            )
-        };
+        let length =
+            unsafe { api_function(wide_path.as_ptr(), buffer.as_mut_ptr(), buffer.len() as u32) };
 
         assert_ne!(
             length,
@@ -75,40 +64,39 @@ fn get_path_name(
             buffer.resize(buffer_size, 0);
         } else {
             // The function succeeded, convert the buffer to a Rust String
-            let c_result_path = unsafe { CStr::from_ptr(buffer.as_ptr() as *const c_char) };
-            return c_result_path.to_str().unwrap().to_owned();
+            return PathBuf::from(OsString::from_wide(&buffer[..length as usize]));
         }
     }
 }
 
 #[cfg(windows)]
-fn get_long_path_name(short_path: &str) -> String {
-    get_path_name(short_path, GetLongPathNameA)
+fn get_long_path_name(short_path: &PathBuf) -> PathBuf {
+    get_path_name(short_path, GetLongPathNameW)
 }
 
 #[cfg(windows)]
-fn get_short_path_name(long_path: &str) -> String {
-    get_path_name(long_path, GetShortPathNameA)
+fn get_short_path_name(long_path: &PathBuf) -> PathBuf {
+    get_path_name(long_path, GetShortPathNameW)
 }
 
 fn main() {
     let wrapper_path;
     #[cfg(windows)]
     let short_path_using;
+    let exe_path = env::current_exe().expect("Get executable path");
     #[cfg(windows)]
     {
-        let exe_path = env::current_exe().expect("Get executable path");
-        let exe_path_str = exe_path.to_str().unwrap();
-        short_path_using = exe_path_str == get_short_path_name(exe_path_str);
-        if short_path_using {
-            wrapper_path = PathBuf::from(get_long_path_name(exe_path_str));
+        let short_path = get_short_path_name(&exe_path);
+        short_path_using = exe_path == short_path;
+        wrapper_path = if short_path_using {
+            get_long_path_name(&exe_path)
         } else {
-            wrapper_path = exe_path;
+            exe_path
         }
     }
     #[cfg(unix)]
     {
-        wrapper_path = env::current_exe().expect("Get exec full path");
+        wrapper_path = exe_path;
     }
     let wrapper_name = Path::new(&wrapper_path)
         .file_name()
@@ -139,11 +127,10 @@ fn main() {
 
     /* Get tool path */
     let exec_path = bin_dir.join(format!("{}{}", XTENSA_TOOLCHAIN_PREFIX, tool_name));
-    let exec_path_str = exec_path.as_path().display().to_string();
     assert!(
         exec_path.try_exists().unwrap(),
         "Tool {} is not exist",
-        exec_path_str
+        exec_path.display()
     );
 
     let dynconfig_filename = format!("xtensa_{}.so", chip);
@@ -152,44 +139,41 @@ fn main() {
         .parent()
         .expect("Toolchain must be in some directory")
         .join("lib")
-        .as_path()
         .join(dynconfig_filename.clone());
-
-    let dynconfig_path_str = dynconfig_path.as_path().display().to_string();
-
-    #[cfg(windows)]
-    let dynconfig = if short_path_using {
-        get_short_path_name(&dynconfig_path_str)
-    } else {
-        dynconfig_path_str
-    };
-    #[cfg(unix)]
-    let dynconfig = dynconfig_path_str;
 
     assert!(
         dynconfig_path.try_exists().unwrap(),
         "Dynconfig for target {} is not exist ({})",
         chip,
-        dynconfig
+        dynconfig_path.display()
     );
 
+    #[cfg(windows)]
+    let dynconfig_path = if short_path_using {
+        get_short_path_name(&dynconfig_path)
+    } else {
+        dynconfig_path
+    };
+
     /* Set XTENSA_GNU_CONFIG env variable */
-    esp_debug_trace!("export {}={}", CONFIG_ENV_NAME, dynconfig);
-    env::set_var(CONFIG_ENV_NAME, dynconfig);
+    esp_debug_trace!("export {}={}", CONFIG_ENV_NAME, dynconfig_path.display());
+    env::set_var(CONFIG_ENV_NAME, dynconfig_path);
 
     let mut argv: Vec<String> = std::env::args().peekable().collect();
     #[cfg(windows)]
     {
         argv[0] = if short_path_using {
-            get_short_path_name(&exec_path_str)
+            get_short_path_name(&exec_path).display().to_string()
         } else {
-            exec_path_str
+            exec_path.display().to_string()
         };
     }
-    #[cfg(unix)]
+
+    #[cfg(not(windows))]
     {
-        argv[0] = exec_path_str;
+        argv[0] = exec_path.display().to_string();
     }
+
     if is_compiler(tool_name) {
         /* Need to add mdynconfig option for using the right multilib instance */
         let dynconfig_option = format!("-mdynconfig={}", dynconfig_filename);
@@ -202,6 +186,9 @@ fn main() {
 
 #[cfg(unix)]
 fn exec(argv: Vec<String>) {
+    use std::ffi::CString;
+    use std::ptr::null;
+
     let argv: Vec<CString> = argv
         .iter()
         .map(|x| CString::new(x.as_bytes()).unwrap())
@@ -225,6 +212,8 @@ fn exec(argv: Vec<String>) {
 
 #[cfg(windows)]
 fn exec(argv: Vec<String>) {
+    use std::process::{exit, Command, ExitStatus};
+
     let mut child = Command::new(argv.get(0).expect("app in argv[0]"))
         .args(&argv[1..])
         .spawn()
