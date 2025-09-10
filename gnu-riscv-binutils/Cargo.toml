@@ -1,0 +1,18 @@
+[package]
+name = "riscv-binutil-wrapper"
+version = "1.0.0"
+edition = "2021"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+lazy_static = "1.5.0"
+libc = "0.2.175"
+
+[[bin]]
+name = "riscv-binutil-wrapper"
+path = "main.rs"
+
+[profile.release]
+opt-level = "z"
+strip = true
