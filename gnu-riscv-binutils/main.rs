@@ -208,8 +208,8 @@ fn get_tool_suffix() -> String {
                     return found_version.to_string();
                 }
                 if line.contains("xesppie") {
-                    esp_debug_trace!("found xesppie extension");
-                    return "xesppie".to_string();
+                    esp_debug_trace!("found xesppie extension, use xespv2p1 suffix");
+                    return "xespv2p1".to_string();
                 }
             }
         }
