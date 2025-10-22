@@ -153,6 +153,10 @@ fn get_tool_suffix() -> String {
                 march_extension = current_version.to_string();
                 esp_debug_trace!("march_extension=\"{}\"", march_extension);
             }
+            if value.contains("xesppie") {
+                tool_suffix = "xespv2p1".to_string();
+                esp_debug_trace!("xesppie found in march ({})", value);
+            }
         }
     }
 
