@@ -122,6 +122,63 @@ fn is_elf_or_static_lib(path: &Path) -> bool {
     path.is_file() && (is_elf_file(path) || is_static_lib(path))
 }
 
+/// Parses command line arguments to determine tool suffix from -mespv-spec= or -march= options
+///
+/// # Arguments
+/// * `argv` - Command line arguments vector (without program name)
+///
+/// # Returns
+/// Some(suffix) if found in arguments, None otherwise
+fn parse_args_for_suffix(argv: &[String]) -> Option<String> {
+    let mut tool_suffix = String::new();
+
+    esp_debug_trace!("parse_args_for_suffix: entered");
+    /* 1. Iterate and check all "-mespv-spec=" arguments
+     * The last one will be applied.
+     */
+    /* 2. Get suffix from the -march option of as/ld if any of XESPV_VERSIONS is specified */
+    for arg in argv {
+        if let Some(value) = arg.strip_prefix(XESPV_ARG_PREFIX) {
+            tool_suffix = format!("xespv{}", value);
+            esp_debug_trace!("tool_suffix=\"{}\" based on XESPV_ARG_PREFIX: \"{}\"", tool_suffix, arg);
+        }
+        if let Some(value) = arg.strip_prefix(MARCH_ARG_PREFIX) {
+            if let Some(current_version) = XESPV_VERSIONS.iter().find(|v| value.contains(*v)) {
+                tool_suffix = current_version.to_string();
+                esp_debug_trace!("tool_suffix=\"{}\" based on XESPV_VERSIONS: \"{}\"", tool_suffix, arg);
+            }
+        }
+        if let Some(value) = arg.strip_prefix('@') {
+            // filepath may be surrounded by quotes and double quotes, so strip them
+            esp_debug_trace!("processing response file=\"{}\"", value);
+            let value = value.trim_matches('"').trim_matches('\'');
+            esp_debug_trace!("quotes stripped=\"{}\"", value);
+
+            match std::fs::read_to_string(value) {
+                Ok(content) => {
+                    let flags: Vec<String> = content.split_whitespace().map(|s| s.to_string()).collect();
+
+                    if let Some(suffix) = parse_args_for_suffix(&flags) {
+                        tool_suffix = suffix;
+                        esp_debug_trace!("tool_suffix=\"{}\" based on response file \"{}\"", tool_suffix, value);
+                    }
+                }
+                Err(e) => {
+                    esp_debug_trace!("Warning: Failed to read response file \"{}\": {}", value, e);
+                    // Continue processing other arguments instead of panicking
+                }
+            }
+        }
+    }
+
+    esp_debug_trace!("parse_args_for_suffix: return tool_suffix=\"{}\"", tool_suffix);
+    if !tool_suffix.is_empty() {
+        return Some(tool_suffix);
+    }
+
+    None
+}
+
 /// Determines the tool suffix to use based on command line arguments or ELF file analysis
 ///
 /// Priority order:
@@ -133,37 +190,12 @@ fn is_elf_or_static_lib(path: &Path) -> bool {
 /// # Returns
 /// String suffix to append to the tool name
 fn get_tool_suffix() -> String {
-    let mut tool_suffix = String::new();
-    let mut march_extension = String::new();
-
     // Skip the program name
     let argv: Vec<String> = env::args().skip(1).collect();
 
-    /* 1. Iterate and check all "-mespv-spec=" arguments
-     * The last one will be applied.
-     */
-    /* 2. Get suffix from the -march option of as/ld if any of XESPV_VERSIONS is specified */
-    for arg in &argv {
-        if let Some(value) = arg.strip_prefix(XESPV_ARG_PREFIX) {
-            tool_suffix = format!("xespv{}", value);
-            esp_debug_trace!("tool_suffix=\"{}\"", tool_suffix);
-        }
-        if let Some(value) = arg.strip_prefix(MARCH_ARG_PREFIX) {
-            if let Some(current_version) = XESPV_VERSIONS.iter().find(|v| value.contains(*v)) {
-                march_extension = current_version.to_string();
-                esp_debug_trace!("march_extension=\"{}\"", march_extension);
-            }
-        }
-    }
-
-    if !tool_suffix.is_empty() {
-        esp_debug_trace!("return \"{}\" based on {}", tool_suffix, XESPV_ARG_PREFIX);
-        return tool_suffix;
-    }
-
-    if !march_extension.is_empty() {
-        esp_debug_trace!("return \"{}\" based on {}", march_extension, MARCH_ARG_PREFIX);
-        return march_extension;
+    // Try to get suffix from command line arguments first
+    if let Some(suffix) = parse_args_for_suffix(&argv) {
+        return suffix;
     }
 
     /* 3. For objdump only: analyze ELF files to determine extension from Tag_RISCV_arch */
@@ -216,12 +248,9 @@ fn get_tool_suffix() -> String {
     }
 
     /* 4. Use default suffix if not found */
-    if tool_suffix.is_empty() {
-        tool_suffix = String::from(XESPV_VERSIONS[0]);
-        esp_debug_trace!("use default tool_suffix=\"{}\"", tool_suffix);
-    }
+    esp_debug_trace!("use default tool_suffix=\"{}\"", XESPV_VERSIONS[0]);
 
-    tool_suffix
+    String::from(XESPV_VERSIONS[0])
 }
 
 /// Gets the current executable path and determines if it's using short path names on Windows
