@@ -175,7 +175,7 @@ fn get_exec_argv(no_python: bool) -> Vec<String> {
 }
 
 fn exec_gdb_test(mut argv: Vec<String>) -> bool {
-    argv.extend(vec!["--batch-silent".to_string()]);
+    argv.extend(vec!["--batch-silent".to_string(), "--nh".to_string()]);
 
     esp_debug_trace!("Test execution of GDB with argv: {:?}", argv);
     match Command::new(argv.get(0).unwrap())
