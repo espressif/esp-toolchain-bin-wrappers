@@ -146,6 +146,9 @@ fn parse_args_for_suffix(argv: &[String]) -> Option<String> {
             if let Some(current_version) = XESPV_VERSIONS.iter().find(|v| value.contains(*v)) {
                 tool_suffix = current_version.to_string();
                 esp_debug_trace!("tool_suffix=\"{}\" based on XESPV_VERSIONS: \"{}\"", tool_suffix, arg);
+            } else if value.contains("xesppie") {
+                tool_suffix = "xespv2p1".to_string();
+                esp_debug_trace!("tool_suffix=\"{}\" based on xesppie", tool_suffix);
             }
         }
         if let Some(value) = arg.strip_prefix('@') {
