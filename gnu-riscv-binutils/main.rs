@@ -9,7 +9,6 @@ use std::process::Command;
 use std::iter::once;
 
 const XESPV_VERSIONS: [&str; 3] = ["xespv3p0", "xespv2p2", "xespv2p1"];
-const XESPV_ARG_PREFIX: &str = "-mespv-spec=";
 const MARCH_ARG_PREFIX: &str = "-march=";
 const ELF_MAGIC: [u8; 4] = [0x7F, b'E', b'L', b'F'];
 const AR_MAGIC: &[u8] = b"!<arch>\n";
@@ -122,7 +121,7 @@ fn is_elf_or_static_lib(path: &Path) -> bool {
     path.is_file() && (is_elf_file(path) || is_static_lib(path))
 }
 
-/// Parses command line arguments to determine tool suffix from -mespv-spec= or -march= options
+/// Parses command line arguments to determine tool suffix from -march= options
 ///
 /// # Arguments
 /// * `argv` - Command line arguments vector (without program name)
@@ -133,15 +132,8 @@ fn parse_args_for_suffix(argv: &[String]) -> Option<String> {
     let mut tool_suffix = String::new();
 
     esp_debug_trace!("parse_args_for_suffix: entered");
-    /* 1. Iterate and check all "-mespv-spec=" arguments
-     * The last one will be applied.
-     */
-    /* 2. Get suffix from the -march option of as/ld if any of XESPV_VERSIONS is specified */
+    /* 1. Get suffix from the -march option of as/ld if any of XESPV_VERSIONS is specified */
     for arg in argv {
-        if let Some(value) = arg.strip_prefix(XESPV_ARG_PREFIX) {
-            tool_suffix = format!("xespv{}", value);
-            esp_debug_trace!("tool_suffix=\"{}\" based on XESPV_ARG_PREFIX: \"{}\"", tool_suffix, arg);
-        }
         if let Some(value) = arg.strip_prefix(MARCH_ARG_PREFIX) {
             if let Some(current_version) = XESPV_VERSIONS.iter().find(|v| value.contains(*v)) {
                 tool_suffix = current_version.to_string();
@@ -182,10 +174,9 @@ fn parse_args_for_suffix(argv: &[String]) -> Option<String> {
 /// Determines the tool suffix to use based on command line arguments or ELF file analysis
 ///
 /// Priority order:
-/// 1. Use suffix from "-mespv-spec=" command line argument if provided
-/// 2. Get suffix from the -march option of as/ld if any of XESPV_VERSIONS is specified
-/// 3. Objdump: analyze ELF files to determine extension from Tag_RISCV_arch
-/// 4. Fallback to default suffix (first item in XESPV_VERSIONS)
+/// 1. Get suffix from the -march option of as/ld if any of XESPV_VERSIONS is specified
+/// 2. Objdump: analyze ELF files to determine extension from Tag_RISCV_arch
+/// 3. Fallback to default suffix (first item in XESPV_VERSIONS)
 ///
 /// # Returns
 /// String suffix to append to the tool name
@@ -198,7 +189,7 @@ fn get_tool_suffix() -> String {
         return suffix;
     }
 
-    /* 3. For objdump only: analyze ELF files to determine extension from Tag_RISCV_arch */
+    /* 2. For objdump only: analyze ELF files to determine extension from Tag_RISCV_arch */
     let (wrapper_path, is_short_path) = get_current_exe_path();
     let stem = wrapper_path.file_stem().expect("file stem").to_string_lossy();
     esp_debug_trace!("stem=\"{}\"", stem);
@@ -222,7 +213,7 @@ fn get_tool_suffix() -> String {
         readelf_exe_path = correct_path(readelf_exe_path, is_short_path);
 
         esp_debug_trace!("readelf_exe_path=\"{}\"", readelf_exe_path.display());
-        /* 2. check in Tag_RISCV_arch in ELF files */
+        /* check in Tag_RISCV_arch in ELF files */
         for arg in &argv {
             let path = Path::new(arg);
             if !is_elf_or_static_lib(path) {
@@ -247,7 +238,7 @@ fn get_tool_suffix() -> String {
         }
     }
 
-    /* 4. Use default suffix if not found */
+    /* 3. Use default suffix if not found */
     esp_debug_trace!("use default tool_suffix=\"{}\"", XESPV_VERSIONS[0]);
 
     String::from(XESPV_VERSIONS[0])
@@ -302,9 +293,6 @@ fn main() {
     let mut argv: Vec<String> = std::env::args().collect();
     let (wrapper_path, is_short_path) = get_current_exe_path();
     let tool_suffix = get_tool_suffix();
-
-    // Remove all "-mespv-spec=" arguments from argv
-    argv.retain(|arg| !arg.starts_with(XESPV_ARG_PREFIX));
 
     let stem = wrapper_path.file_stem().expect("file stem").to_string_lossy();
     let ext  = wrapper_path.extension().map(|e| e.to_string_lossy());
