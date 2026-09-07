@@ -8,7 +8,7 @@ use std::process::Command;
 #[cfg(windows)]
 use std::iter::once;
 
-const XESPV_VERSIONS: [&str; 2] = ["xespv2p2", "xespv2p1"];
+const XESPV_VERSIONS: [&str; 3] = ["xespv3p0", "xespv2p2", "xespv2p1"];
 const XESPV_ARG_PREFIX: &str = "-mespv-spec=";
 const MARCH_ARG_PREFIX: &str = "-march=";
 const ELF_MAGIC: [u8; 4] = [0x7F, b'E', b'L', b'F'];
