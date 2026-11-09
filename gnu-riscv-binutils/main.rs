@@ -9,6 +9,12 @@ use std::process::Command;
 use std::iter::once;
 
 const XESPV_VERSIONS: [&str; 3] = ["xespv3p0", "xespv2p2", "xespv2p1"];
+// Each as/objdump binary has one opcode table baked in. DSP 2.2
+// (0x6b / custom-0) lives in xespv3p0, which is also the default.
+// Arch strings that name an extension here and no XESPV_VERSIONS token
+// select the paired tool. First match wins; put more specific extensions first.
+// DSP 2.1 (custom-3 / custom-2) -> xespv2p2.
+const EXT_TO_TOOL_SUFFIX: &[(&str, &str)] = &[("xespdsp2p1", "xespv2p2")];
 const MARCH_ARG_PREFIX: &str = "-march=";
 const ELF_MAGIC: [u8; 4] = [0x7F, b'E', b'L', b'F'];
 const AR_MAGIC: &[u8] = b"!<arch>\n";
@@ -121,6 +127,42 @@ fn is_elf_or_static_lib(path: &Path) -> bool {
     path.is_file() && (is_elf_file(path) || is_static_lib(path))
 }
 
+/// Tool suffix for the first EXT_TO_TOOL_SUFFIX key contained in `text`.
+fn tool_suffix_for_ext(text: &str) -> Option<&'static str> {
+    EXT_TO_TOOL_SUFFIX
+        .iter()
+        .find(|(ext, _)| text.contains(ext))
+        .map(|(_, suffix)| *suffix)
+}
+
+/// Suffix from a Tag_RISCV_arch line. An xespv token wins, then a mapped
+/// extension, then xesppie.
+fn suffix_from_arch_line(line: &str) -> Option<&'static str> {
+    if let Some(found_version) = XESPV_VERSIONS.iter().find(|v| line.contains(*v)) {
+        esp_debug_trace!("arch line has {}", found_version);
+        return Some(*found_version);
+    }
+    if let Some(suffix) = tool_suffix_for_ext(line) {
+        esp_debug_trace!("found mapped extension, use {} suffix", suffix);
+        return Some(suffix);
+    }
+    if line.contains("xesppie") {
+        esp_debug_trace!("found xesppie extension, use xespv2p1 suffix");
+        return Some("xespv2p1");
+    }
+    None
+}
+
+/// Suffix from a -march= value that names a mapped extension. Response files
+/// are handled by the recursive parse_args_for_suffix call, so this only
+/// looks at this argv. First matching argument wins.
+fn march_ext_suffix(argv: &[String]) -> Option<&'static str> {
+    argv.iter().find_map(|arg| {
+        arg.strip_prefix(MARCH_ARG_PREFIX)
+            .and_then(tool_suffix_for_ext)
+    })
+}
+
 /// Parses command line arguments to determine tool suffix from -march= options
 ///
 /// # Arguments
@@ -163,6 +205,16 @@ fn parse_args_for_suffix(argv: &[String]) -> Option<String> {
         }
     }
 
+    // Mapped extensions have no xespv token. Without this, the wrapper
+    // defaults to xespv3p0 and assembles them with the wrong opcode map.
+    // An explicit xespv version already stored in tool_suffix keeps priority.
+    if tool_suffix.is_empty() {
+        if let Some(suffix) = march_ext_suffix(argv) {
+            tool_suffix = suffix.to_string();
+            esp_debug_trace!("found mapped extension, use {} suffix", suffix);
+        }
+    }
+
     esp_debug_trace!("parse_args_for_suffix: return tool_suffix=\"{}\"", tool_suffix);
     if !tool_suffix.is_empty() {
         return Some(tool_suffix);
@@ -175,8 +227,9 @@ fn parse_args_for_suffix(argv: &[String]) -> Option<String> {
 ///
 /// Priority order:
 /// 1. Get suffix from the -march option of as/ld if any of XESPV_VERSIONS is specified
-/// 2. Objdump: analyze ELF files to determine extension from Tag_RISCV_arch
-/// 3. Fallback to default suffix (first item in XESPV_VERSIONS)
+/// 2. -march names a mapped extension and no xespv version: paired tool suffix
+/// 3. Objdump: analyze ELF files to determine extension from Tag_RISCV_arch
+/// 4. Fallback to default suffix (first item in XESPV_VERSIONS)
 ///
 /// # Returns
 /// String suffix to append to the tool name
@@ -226,13 +279,9 @@ fn get_tool_suffix() -> String {
                 .unwrap_or_else(|err| panic!("Failed to run readelf on {}: {}", path.display(), err));
             let stdout = String::from_utf8_lossy(&output.stdout);
             if let Some(line) = stdout.lines().find(|l| l.contains("Tag_RISCV_arch")) {
-                if let Some(found_version) = XESPV_VERSIONS.iter().find(|v| line.contains(*v)) {
-                    esp_debug_trace!("file {} has {}", path.display(), found_version);
-                    return found_version.to_string();
-                }
-                if line.contains("xesppie") {
-                    esp_debug_trace!("found xesppie extension, use xespv2p1 suffix");
-                    return "xespv2p1".to_string();
+                if let Some(suffix) = suffix_from_arch_line(line) {
+                    esp_debug_trace!("file {} has {}", path.display(), suffix);
+                    return suffix.to_string();
                 }
             }
         }
@@ -350,4 +399,202 @@ fn exec(argv: Vec<String>) {
         Some(c) => exit(c),
         None => exit(-1),
     };
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs;
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    fn args(items: &[&str]) -> Vec<String> {
+        items.iter().map(|s| (*s).to_string()).collect()
+    }
+
+    fn temp_file(name: &str, contents: &[u8]) -> PathBuf {
+        static N: AtomicU64 = AtomicU64::new(0);
+        let path = std::env::temp_dir().join(format!(
+            "riscv-binutil-wrapper-{}-{}-{}",
+            std::process::id(),
+            N.fetch_add(1, Ordering::Relaxed),
+            name
+        ));
+        fs::write(&path, contents).unwrap();
+        path
+    }
+
+    #[test]
+    fn ext_map_selects_paired_suffix() {
+        assert_eq!(
+            tool_suffix_for_ext("rv32imc_xespdsp2p1"),
+            Some("xespv2p2")
+        );
+        assert_eq!(tool_suffix_for_ext("rv32imc"), None);
+    }
+
+    #[test]
+    fn march_ext_ignores_args_without_the_extension() {
+        assert_eq!(march_ext_suffix(&args(&["-o", "out.o"])), None);
+        assert_eq!(
+            march_ext_suffix(&args(&[
+                "-march=rv32imc",
+                "-march=rv32imc_xespdsp2p1_zicsr",
+            ])),
+            Some("xespv2p2")
+        );
+    }
+
+    #[test]
+    fn march_xespv_version_selects_that_tool() {
+        assert_eq!(
+            parse_args_for_suffix(&args(&["-march=rv32imc_xespv3p0"])).as_deref(),
+            Some("xespv3p0")
+        );
+        assert_eq!(
+            parse_args_for_suffix(&args(&["-march=rv32imc_xespv2p2"])).as_deref(),
+            Some("xespv2p2")
+        );
+        assert_eq!(
+            parse_args_for_suffix(&args(&["-march=rv32imc_xespv2p1"])).as_deref(),
+            Some("xespv2p1")
+        );
+    }
+
+    #[test]
+    fn march_without_version_or_mapped_ext_returns_none() {
+        assert_eq!(parse_args_for_suffix(&args(&["-march=rv32imc"])), None);
+        assert_eq!(parse_args_for_suffix(&[]), None);
+    }
+
+    #[test]
+    fn mapped_ext_selects_paired_tool_when_no_xespv_token() {
+        assert_eq!(
+            parse_args_for_suffix(&args(&["-march=rv32imc_xespdsp2p1"])).as_deref(),
+            Some("xespv2p2")
+        );
+    }
+
+    #[test]
+    fn explicit_xespv_beats_mapped_extension() {
+        assert_eq!(
+            parse_args_for_suffix(&args(&[
+                "-march=rv32imc_xespdsp2p1",
+                "-march=rv32imc_xespv3p0",
+            ]))
+            .as_deref(),
+            Some("xespv3p0")
+        );
+        assert_eq!(
+            parse_args_for_suffix(&args(&["-march=rv32imc_xespdsp2p1_xespv2p1"])).as_deref(),
+            Some("xespv2p1")
+        );
+    }
+
+    #[test]
+    fn later_xespv_march_replaces_earlier_one() {
+        assert_eq!(
+            parse_args_for_suffix(&args(&[
+                "-march=rv32imc_xespv2p1",
+                "-march=rv32imc_xespv3p0",
+            ]))
+            .as_deref(),
+            Some("xespv3p0")
+        );
+    }
+
+    #[test]
+    fn xespv_table_order_wins_inside_one_march_value() {
+        assert_eq!(
+            parse_args_for_suffix(&args(&["-march=rv32imc_xespv2p2_xespv3p0"])).as_deref(),
+            Some("xespv3p0")
+        );
+    }
+
+    #[test]
+    fn response_file_supplies_mapped_extension() {
+        let path = temp_file("dsp.rsp", b"-march=rv32imc_xespdsp2p1\n");
+        let flag = format!("@{}", path.display());
+        assert_eq!(
+            parse_args_for_suffix(&args(&[&flag])).as_deref(),
+            Some("xespv2p2")
+        );
+        let quoted = format!("@\"{}\"", path.display());
+        assert_eq!(
+            parse_args_for_suffix(&args(&[&quoted])).as_deref(),
+            Some("xespv2p2")
+        );
+        fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn response_file_xespv_replaces_cmdline_version() {
+        let path = temp_file("ver.rsp", b"-march=rv32imc_xespv2p1\n");
+        let flag = format!("@{}", path.display());
+        assert_eq!(
+            parse_args_for_suffix(&args(&["-march=rv32imc_xespv3p0", &flag])).as_deref(),
+            Some("xespv2p1")
+        );
+        fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn missing_response_file_keeps_other_suffix() {
+        assert_eq!(
+            parse_args_for_suffix(&args(&[
+                "-march=rv32imc_xespv2p2",
+                "@no-such-response-file-riscv-wrapper",
+            ]))
+            .as_deref(),
+            Some("xespv2p2")
+        );
+        assert_eq!(
+            parse_args_for_suffix(&args(&["@no-such-response-file-riscv-wrapper"])),
+            None
+        );
+    }
+
+    #[test]
+    fn arch_line_priority() {
+        assert_eq!(
+            suffix_from_arch_line("Tag_RISCV_arch: rv32imc_xespv3p0"),
+            Some("xespv3p0")
+        );
+        assert_eq!(
+            suffix_from_arch_line("Tag_RISCV_arch: rv32imc_xespdsp2p1"),
+            Some("xespv2p2")
+        );
+        assert_eq!(
+            suffix_from_arch_line("Tag_RISCV_arch: rv32imc_xespdsp2p1_xespv3p0"),
+            Some("xespv3p0")
+        );
+        assert_eq!(
+            suffix_from_arch_line("Tag_RISCV_arch: rv32imc_xesppie"),
+            Some("xespv2p1")
+        );
+        assert_eq!(
+            suffix_from_arch_line("Tag_RISCV_arch: rv32imc_xespdsp2p1_xesppie"),
+            Some("xespv2p2")
+        );
+        assert_eq!(suffix_from_arch_line("Tag_RISCV_arch: rv32imc"), None);
+    }
+
+    #[test]
+    fn file_magic_detects_elf_and_archive() {
+        let elf = temp_file("a.elf", b"\x7fELF and then junk");
+        let ar = temp_file("lib.a", b"!<arch>\nsymbol table");
+        let other = temp_file("note.txt", b"not a binary");
+        assert!(is_elf_file(&elf));
+        assert!(!is_static_lib(&elf));
+        assert!(is_elf_or_static_lib(&elf));
+        assert!(is_static_lib(&ar));
+        assert!(!is_elf_file(&ar));
+        assert!(is_elf_or_static_lib(&ar));
+        assert!(!is_elf_file(&other));
+        assert!(!is_static_lib(&other));
+        assert!(!is_elf_or_static_lib(&other));
+        assert!(!is_elf_file(Path::new("missing-riscv-wrapper-file")));
+        fs::remove_file(elf).unwrap();
+        fs::remove_file(ar).unwrap();
+        fs::remove_file(other).unwrap();
+    }
 }
